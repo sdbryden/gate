@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111111">
+<title>Gate</title>
+<style>
+  body { font-family: system-ui, sans-serif; display: flex; flex-direction: column;
+         align-items: center; justify-content: center; min-height: 100vh; margin: 0;
+         padding: 0 1rem; background: #111; color: #eee; text-align: center; }
+  button { font-size: 2rem; padding: 1.5rem 3rem; border-radius: 1rem; border: 0;
+           background: #2a7; color: #fff; }
+  button:disabled { background: #555; }
+  #status { margin-top: 1.5rem; min-height: 3em; max-width: 24rem; }
+  .err { color: #f77; }
+</style>
+</head>
+<body>
+<button id="go">Open gate</button>
+<div id="status"></div>
+<script>
+const SERVICE   = '6e0a7c1e-3b2d-4f6a-9c1e-5a7b8d9e0f10';
+const TRIGGER   = '6e0a7c1e-3b2d-4f6a-9c1e-5a7b8d9e0f11';
+const CHALLENGE = '6e0a7c1e-3b2d-4f6a-9c1e-5a7b8d9e0f12';
+const STORE_KEY = 'gateKey';
+
+const btn = document.getElementById('go');
+const statusEl = document.getElementById('status');
+
+function show(msg, isError = false) {
+  statusEl.textContent = msg;
+  statusEl.className = isError ? 'err' : '';
+}
+
+// The setup link carries the key as "#k=<slot>.<64 hex chars>". The part after
+// '#' is never sent to the web server. It stays in the URL, so a home-screen
+// shortcut or bookmark made from the link keeps working on its own.
+function loadKey() {
+  const m = location.hash.match(/^#k=(\d+)\.([0-9a-f]{64})$/i);
+  if (m) {
+    const k = { slot: Number(m[1]), key: m[2].toLowerCase() };
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(k)); } catch (e) {}
+    return k;
+  }
+  try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch (e) { return null; }
+}
+
+function hexToBytes(hex) {
+  return new Uint8Array(hex.match(/../g).map(h => parseInt(h, 16)));
+}
+
+async function answer(k, nonce) {
+  const key = await crypto.subtle.importKey(
+    'raw', hexToBytes(k.key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const msg = new Uint8Array(4 + nonce.length + 1);
+  msg.set([0x47, 0x41, 0x54, 0x45]); // "GATE"
+  msg.set(nonce, 4);
+  msg[msg.length - 1] = k.slot;
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, msg)).slice(0, 16);
+  const out = new Uint8Array(1 + mac.length);
+  out[0] = k.slot;
+  out.set(mac, 1);
+  return out;
+}
+
+const gateKey = loadKey();
+
+if (!navigator.bluetooth) {
+  show('This browser has no Bluetooth support. Use Chrome on Android, or the Bluefy browser on iPhone.', true);
+  btn.disabled = true;
+} else if (!gateKey) {
+  show('No key on this phone. Open the setup link you were sent.', true);
+  btn.disabled = true;
+}
+
+btn.onclick = async () => {
+  btn.disabled = true;
+  let device;
+  let step = 'connect';
+  try {
+    show('Select the gate…');
+    device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
+    show('Connecting…');
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE);
+    const chal = await svc.getCharacteristic(CHALLENGE);
+    const trig = await svc.getCharacteristic(TRIGGER);
+    const dv = await chal.readValue();
+    const nonce = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+    step = 'trigger';
+    await trig.writeValueWithResponse(await answer(gateKey, nonce));
+    show('Sent ✔');
+  } catch (e) {
+    if (e.name === 'NotFoundError') {
+      show('Cancelled.');
+    } else if (step === 'trigger') {
+      show('The gate refused this phone. Your key may have been revoked. Ask for a new setup link.', true);
+    } else {
+      show('Could not reach the gate: ' + e.message, true);
+    }
+  } finally {
+    if (device && device.gatt.connected) device.gatt.disconnect();
+    btn.disabled = false;
+  }
+};
+</script>
+</body>
+</html>
